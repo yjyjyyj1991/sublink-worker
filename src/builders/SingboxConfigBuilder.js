@@ -1,5 +1,5 @@
 
-import { SING_BOX_CONFIG, generateRuleSets, generateRules, getOutbounds, PREDEFINED_RULE_SETS } from '../config/index.js';
+import { SING_BOX_CONFIG, generateRuleSets, generateRules, getOutbounds, PREDEFINED_RULE_SETS, DIRECT_DEFAULT_RULES } from '../config/index.js';
 import { BaseConfigBuilder } from './BaseConfigBuilder.js';
 import { deepCopy, groupProxiesByCountry } from '../utils.js';
 import { addProxyWithDedup } from './helpers/proxyHelpers.js';
@@ -201,10 +201,14 @@ export class SingboxConfigBuilder extends BaseConfigBuilder {
     addOutboundGroups(outbounds, proxyList) {
         outbounds.forEach(outbound => {
             if (outbound !== this.t('outboundNames.Node Select')) {
-                const selectorMembers = this.buildSelectorMembers(proxyList);
+                let selectorMembers = this.buildSelectorMembers(proxyList);
                 const tag = this.t(`outboundNames.${outbound}`);
                 if (this.hasOutboundTag(tag)) {
                     return;
+                }
+                // For rules that should default to DIRECT, move DIRECT to the front
+                if (DIRECT_DEFAULT_RULES.has(outbound)) {
+                    selectorMembers = ['DIRECT', ...selectorMembers.filter(p => p !== 'DIRECT')];
                 }
                 this.config.outbounds.push({
                     type: "selector",
@@ -425,44 +429,63 @@ export class SingboxConfigBuilder extends BaseConfigBuilder {
         // Validate outbounds: fill empty urltest groups with all proxies
         this.validateOutbounds();
 
-        rules.filter(rule => !!rule.domain_suffix || !!rule.domain_keyword).map(rule => {
-            this.config.route.rules.push({
-                domain_suffix: rule.domain_suffix,
-                domain_keyword: rule.domain_keyword,
-                protocol: rule.protocol,
+        const attachProtocolIfNeeded = (entry, rule) => {
+            if (Array.isArray(rule?.protocol) && rule.protocol.length > 0) {
+                entry.protocol = rule.protocol;
+            }
+            return entry;
+        };
+
+        const hasMatchValues = (value) => {
+            if (Array.isArray(value)) return value.length > 0;
+            if (typeof value === 'string') return value.trim() !== '';
+            return false;
+        };
+
+        rules.filter(rule => Array.isArray(rule.src_ip_cidr) && rule.src_ip_cidr.length > 0).map(rule => {
+            this.config.route.rules.push(attachProtocolIfNeeded({
+                source_ip_cidr: rule.src_ip_cidr,
                 outbound: this.t(`outboundNames.${rule.outbound}`)
-            });
+            }, rule));
+        });
+
+        rules.filter(rule => hasMatchValues(rule.domain_suffix) || hasMatchValues(rule.domain_keyword)).map(rule => {
+            const entry = {
+                outbound: this.t(`outboundNames.${rule.outbound}`)
+            };
+
+            if (hasMatchValues(rule.domain_suffix)) entry.domain_suffix = rule.domain_suffix;
+            if (hasMatchValues(rule.domain_keyword)) entry.domain_keyword = rule.domain_keyword;
+
+            this.config.route.rules.push(attachProtocolIfNeeded(entry, rule));
         });
 
         rules.filter(rule => !!rule.site_rules[0]).map(rule => {
-            this.config.route.rules.push({
+            this.config.route.rules.push(attachProtocolIfNeeded({
                 rule_set: [
                     ...(rule.site_rules.length > 0 && rule.site_rules[0] !== '' ? rule.site_rules : []),
                 ],
-                protocol: rule.protocol,
                 outbound: this.t(`outboundNames.${rule.outbound}`)
-            });
+            }, rule));
         });
 
         rules.filter(rule => !!rule.ip_rules[0]).map(rule => {
-            this.config.route.rules.push({
+            this.config.route.rules.push(attachProtocolIfNeeded({
                 rule_set: [
                     ...(rule.ip_rules
                         .map(ip => ip.trim())
                         .filter(ip => ip !== '')
                         .map(ip => `${ip}-ip`))
                 ],
-                protocol: rule.protocol,
                 outbound: this.t(`outboundNames.${rule.outbound}`)
-            });
+            }, rule));
         });
 
-        rules.filter(rule => !!rule.ip_cidr).map(rule => {
-            this.config.route.rules.push({
+        rules.filter(rule => hasMatchValues(rule.ip_cidr)).map(rule => {
+            this.config.route.rules.push(attachProtocolIfNeeded({
                 ip_cidr: rule.ip_cidr,
-                protocol: rule.protocol,
                 outbound: this.t(`outboundNames.${rule.outbound}`)
-            });
+            }, rule));
         });
 
         this.config.route.rules.unshift(
